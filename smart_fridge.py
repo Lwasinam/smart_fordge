@@ -73,7 +73,7 @@ if API_KEY:
     # --- MODEL CONFIGURATION ---
     # FIXED: Changed to 1.5-flash (2.5 does not exist yet)
     model = genai.GenerativeModel(
-        'gemini-1.5-flash', 
+        'gemini-2.5-flash', 
         system_instruction=system_instruction
     )
 
