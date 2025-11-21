@@ -1,21 +1,30 @@
 import streamlit as st
 import google.generativeai as genai
+from supabase import create_client, Client
 from PIL import Image
 import requests
 from io import BytesIO
+import time
 
-# --- HARDCODED CONFIGURATION ---
-# ⚠️ KEEP THIS PRIVATE. Do not commit this file to public GitHub repos.
-API_KEY = st.secrets["GEMINI_API_KEY"]
-ESP_IP = st.secrets["ESP_IP"]
+# --- CONFIGURATION ---
+try:
+    API_KEY = st.secrets["GEMINI_API_KEY"]
+    SUPABASE_URL = st.secrets["SUPABASE_URL"]
+    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+except FileNotFoundError:
+    st.error("Secrets not found. Please check .streamlit/secrets.toml")
+    st.stop()
+
+# Initialize Supabase Client
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Page Config
 st.set_page_config(page_title="Smart Fridge AI", layout="centered")
 
 st.title("🥦 Smart Fridge Assistant")
-st.caption(f"Powered by ESP32-CAM ({ESP_IP}) & Gemini 1.5 Flash")
+st.caption("Powered by ESP32-CAM (Supabase Cloud) & Gemini 1.5 Flash")
 
-# --- 1. DEFINE THE SYSTEM PROMPT HERE ---
+# --- SYSTEM PROMPT ---
 system_instruction = """
 You are a Smart Assistant with a culinary focus on Nigerian Cuisine. 
 Your goal is to analyze images and help the user.
@@ -33,29 +42,38 @@ Follow these guidelines:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Function to get image from ESP32
-def get_image_from_esp32(url):
+# Function to get image from Supabase Storage
+def get_image_from_supabase():
+    bucket_name = "fridge-images"
+    file_name = "latest_snap.jpg"
+    
     try:
-        # Added timeout to prevent hanging if ESP is off
-        response = requests.get(url, timeout=5)
+        # 1. Get the public URL
+        image_url = supabase.storage.from_(bucket_name).get_public_url(file_name)
+        
+        # 2. Cache Busting: Add a timestamp query param
+        # This forces Streamlit to download the NEW image, not the old cached one.
+        image_url_with_time = f"{image_url}?t={int(time.time())}"
+        
+        # 3. Download the image
+        response = requests.get(image_url_with_time, timeout=5)
         if response.status_code == 200:
-            image = Image.open(BytesIO(response.content))
-            return image
+            return Image.open(BytesIO(response.content))
         else:
-            st.error(f"Failed to connect to camera. Status Code: {response.status_code}")
+            st.warning(f"Could not find image in Supabase. (Status: {response.status_code})")
             return None
     except Exception as e:
-        st.error(f"Connection Error: {e}")
+        st.error(f"Error connecting to Supabase: {e}")
         return None
 
 # Main Logic
 if API_KEY:
     genai.configure(api_key=API_KEY)
     
-    # --- 2. MODEL CONFIGURATION ---
-    # Changed '2.5' to '1.5' as 2.5 is not a valid public model version yet.
+    # --- MODEL CONFIGURATION ---
+    # FIXED: Changed to 1.5-flash (2.5 does not exist yet)
     model = genai.GenerativeModel(
-        'gemini-2.5-flash', 
+        'gemini-1.5-flash', 
         system_instruction=system_instruction
     )
 
@@ -75,22 +93,22 @@ if API_KEY:
             st.markdown(prompt)
         st.session_state.messages.append({"role": "user", "content": prompt})
 
-        # Fetch Image from ESP32
+        # Fetch Image from Supabase
         fridge_image = None
-        with st.spinner("Looking inside the fridge..."):
-            fridge_image = get_image_from_esp32(ESP_IP)
+        with st.spinner("Checking cloud storage for latest photo..."):
+            fridge_image = get_image_from_supabase()
 
         # Prepare inputs
         if fridge_image:
             with st.chat_message("user"):
-                 st.image(fridge_image, caption="Camera View", width=300)
-            # Save image to history for display context
+                 st.image(fridge_image, caption="Latest Fridge View", width=300)
+            
+            # Save image to history
             st.session_state.messages.append({"role": "user", "content": "(Image attached)", "image": fridge_image})
             
             inputs = [prompt, fridge_image]
         else:
-            # Fallback if camera fails: just send text
-            st.warning("Could not capture image. Sending text only.")
+            st.warning("No image found. Using text only.")
             inputs = [prompt]
 
         # Send to Gemini
@@ -99,10 +117,8 @@ if API_KEY:
                 try:
                     response = model.generate_content(inputs)
                     st.markdown(response.text)
-                    
-                    # Add response to history
                     st.session_state.messages.append({"role": "assistant", "content": response.text})
                 except Exception as e:
                     st.error(f"AI Error: {e}")
 else:
-    st.warning("API Key not found. Please check your code.")
+    st.warning("API Key not found. Please check your secrets.")
